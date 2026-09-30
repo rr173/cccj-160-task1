@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重演报告 · 三轴归因</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>🔁 重演报告</h1>
+  <nav>
+    <a href="/">模板 / 发布</a>
+    <a href="evaluate.html">评估页面</a>
+    <a href="replay.html" class="active">重演报告</a>
+  </nav>
+</header>
+
+<div class="layout">
+  <div>
+    <div class="panel">
+      <h2>历史请求</h2>
+      <input id="ridBox" placeholder="request_id（可粘贴）" class="mono">
+      <div class="row" style="margin-top:8px"><button onclick="loadById()">打开请求</button></div>
+      <div id="reqList" style="margin-top:10px" class="smalltxt"></div>
+    </div>
+    <div class="panel">
+      <h2>重演参数</h2>
+      <label>执行模式</label>
+      <select id="mode">
+        <option value="recorded">recorded：用归档版本+归档输入（验证可复现性）</option>
+        <option value="active">active：用当前线上版本+归档输入（看热更新影响）</option>
+      </select>
+      <label>覆盖输入（留空=用归档输入；填写后归因为 INPUT 变化）</label>
+      <textarea id="overrideInputs" placeholder='{"product":"cloud","question":"..."}'></textarea>
+      <div class="row" style="margin-top:8px"><button onclick="doReplay()">运行重演</button></div>
+      <p class="smalltxt">
+        <b>归因轴：</b><br>
+        <span class="chip">INPUT</span> input_digest 不一致<br>
+        <span class="chip">MODEL</span> 同 model_id 指纹变化（上游静默换版）<br>
+        <span class="chip">TEMPLATE</span> version/content hash 不同（热更新/回滚）<br>
+        三轴未变而输出变化 → <span class="chip bad">UNEXPECTED_DRIFT</span>
+      </p>
+    </div>
+    <div class="panel">
+      <h2>重演历史</h2>
+      <div id="repList" class="smalltxt muted"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="reqPanel" style="display:none">
+      <h2>原始请求绑定元数据</h2>
+      <div id="reqMeta"></div>
+      <pre id="reqOutput" style="max-height:100px"></pre>
+    </div>
+    <div class="panel" id="reportPanel" style="display:none">
+      <h2>重演结论 <span id="verdict"></span></h2>
+      <div id="verdictLine" class="smalltxt" style="margin-bottom:10px"></div>
+      <div class="grid2">
+        <div>
+          <h3 class="smalltxt">归档指纹</h3>
+          <pre id="origFp"></pre>
+          <h3 class="smalltxt">归档输出</h3>
+          <pre id="origOut"></pre>
+        </div>
+        <div>
+          <h3 class="smalltxt">重演指纹</h3>
+          <pre id="newFp"></pre>
+          <h3 class="smalltxt">重演输出</h3>
+          <pre id="newOut"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="panel" id="axesPanel" style="display:none">
+      <h2>三轴归因明细</h2>
+      <div id="axes"></div>
+    </div>
+  </div>
+</div>
+<div class="toast"></div>
+<script src="app.js"></script>
+<script>
+let S = { request: null };
+const q = new URLSearchParams(location.search);
+
+async function loadReqList() {
+  const rs = await api.get('/api/requests');
+  document.getElementById('reqList').innerHTML = rs.slice(0, 30).map(r => `
+    <div class="item ${q.get('r') === r.request_id ? 'sel' : ''}" onclick="openRequest('${r.request_id}')">
+      <div class="row" style="justify-content:space-between">
+        <b class="mono">${r.request_id.slice(0,18)}…</b>
+        <span class="chip">v${esc(r.semver)}</span>
+      </div>
+      <div class="smalltxt">${esc(r.model_id)}@${esc(r.model_revision)} ·
+        in:${r.input_digest.slice(0,10)}… · ${esc(r.created_at.slice(11,19))}</div>
+    </div>`).join('') || '<div class=muted>暂无请求</div>';
+}
+function loadById() {
+  const v = document.getElementById('ridBox').value.trim();
+  if (v) openRequest(v);
+}
+async function openRequest(rid) {
+  const r = await api.get(`/api/requests/${rid}`);
+  S.request = r;
+  document.getElementById('ridBox').value = rid;
+  document.getElementById('reqPanel').style.display = '';
+  document.getElementById('reqMeta').innerHTML = `
+    <dl class="kv">
+      <dt>request_id</dt><dd class="mono">${r.request_id}</dd>
+      <dt>时间</dt><dd>${esc(r.created_at)}</dd>
+      <dt>版本</dt><dd class="mono">${esc(r.semver)} · ${r.version_hash}</dd>
+      <dt>模型</dt><dd class="mono">${esc(r.model_id)} @ ${esc(r.model_revision)}<br>
+        fp: ${r.model_fingerprint}</dd>
+      <dt>input_digest</dt><dd class="mono">${r.input_digest}</dd>
+      <dt>inputs</dt><dd class="mono">${esc(JSON.stringify(r.inputs))}</dd>
+      <dt>params</dt><dd class="mono">${esc(JSON.stringify(r.params))}</dd>
+      <dt>prompt_sha</dt><dd class="mono">${r.prompt_sha}</dd>
+    </dl>`;
+  document.getElementById('reqOutput').textContent = r.output_text;
+  document.getElementById('overrideInputs').placeholder = JSON.stringify(r.inputs);
+  loadReqList();
+}
+
+async function doReplay() {
+  guard(async () => {
+    if (!S.request) return toast('先选择请求', true);
+    const body = { mode: document.getElementById('mode').value };
+    const ov = document.getElementById('overrideInputs').value.trim();
+    if (ov) body.inputs = JSON.parse(ov);
+    const rep = await api.post(`/api/requests/${S.request.request_id}/replay`, body);
+    renderReport(rep);
+    loadReplays();
+  });
+}
+
+function axisBlock(name, info) {
+  const cls = info.changed ? 'changed' : 'same';
+  const icon = info.changed ? '⚠️ 变化' : '✓ 一致';
+  let extra = '';
+  if (name === 'INPUT') {
+    extra = `<div class="smalltxt">归档 digest: <span class="mono">${info.detail.recorded_digest.slice(0,24)}…</span><br>
+      重演 digest: <span class="mono">${info.detail.replay_digest.slice(0,24)}…</span></div>`;
+  } else if (name === 'MODEL') {
+    extra = `<div class="smalltxt">
+      归档: <span class="mono">${esc(info.detail.model_id)}@${esc(info.detail.recorded_revision)} fp:${info.detail.recorded_fingerprint}</span><br>
+      当前: <span class="mono">${esc(info.detail.model_id)}@${esc(info.detail.current_revision)} fp:${info.detail.current_fingerprint}</span></div>`;
+  } else {
+    const d = info.detail;
+    extra = `<div class="smalltxt">
+      归档版本: <span class="mono">${esc(d.recorded_semver)} ${(d.recorded_version_hash||'').slice(0,16)}…</span><br>
+      当前线上: <span class="mono">${esc(d.active_semver || '—')} ${(d.active_version_hash||'—').toString().slice(0,16)}…</span>
+      ${d.content_changed === false ? '<div class="ok-text">内容相同（仅部署指针移动）</div>' : ''}</div>`;
+    if (d.diff && d.diff.changed_fields && d.diff.changed_fields.length)
+      extra += `<details style="margin-top:6px"><summary class="muted">字段级差异</summary>
+        <pre>${esc(JSON.stringify(d.diff, null, 2))}</pre></details>`;
+  }
+  return `<div class="axis ${cls}"><div class="row" style="justify-content:space-between">
+      <b>${name}</b><b class="${info.changed ? 'warn-text' : 'ok-text'}">${icon}</b></div>${extra}</div>`;
+}
+
+function renderReport(rep) {
+  document.getElementById('reportPanel').style.display = '';
+  document.getElementById('axesPanel').style.display = '';
+  const vmap = {
+    exact_reproduction: ['✓ 精确复现', 'ok'],
+    changed_but_stable: ['变化轴存在但输出稳定', 'warn'],
+    changed_output: ['输出变化', 'warn'],
+    unexpected_drift: ['!! 非预期漂移（三轴均未变而输出不同）', 'bad'],
+    failed: ['重演失败', 'bad'],
+  };
+  const [txt, cls] = vmap[rep.verdict] || [rep.verdict, ''];
+  document.getElementById('verdict').innerHTML = `<span class="chip ${cls === 'ok' ? 'ok' : cls === 'bad' ? 'bad' : 'warn'}">${txt}</span>`;
+  document.getElementById('verdictLine').innerHTML =
+    `执行相关变化轴: ${(rep.relevant_axes_changed || rep.axes_changed).map(a => `<span class="chip warn">${a}</span>`).join(' ') || '<span class="chip ok">无</span>'}`
+    + (rep.primary_axis ? ` · 主因轴: <b>${rep.primary_axis}</b>` : '')
+    + ` · replay_id: <span class="mono">${rep.replay_id}</span>`
+    + (rep.note ? ` · <span class="bad-text">${esc(rep.note)}</span>` : '')
+    + (rep.mode === 'recorded' && rep.axes.TEMPLATE.changed
+        ? `<div class="smalltxt muted" style="margin-top:6px">环境中线上指针已移到 ${esc(rep.axes.TEMPLATE.detail.active_semver || '其他版本')}，但本次按归档版本 ${esc(rep.original.fingerprints.version_hash.slice(0,12))}… 执行，不影响复现结论。</div>` : '');
+  document.getElementById('origFp').textContent = JSON.stringify(rep.original.fingerprints, null, 2);
+  document.getElementById('newFp').textContent = JSON.stringify(rep.replay.fingerprints, null, 2);
+  document.getElementById('origOut').textContent = rep.original.output;
+  document.getElementById('newOut').textContent = rep.replay.output ?? '(null)';
+  document.getElementById('axes').innerHTML =
+    axisBlock('INPUT', rep.axes.INPUT) + axisBlock('MODEL', rep.axes.MODEL) + axisBlock('TEMPLATE', rep.axes.TEMPLATE);
+}
+
+async function loadReplays() {
+  const rs = await api.get('/api/replays');
+  document.getElementById('repList').innerHTML = rs.slice(0, 20).map(r => `
+    <div class="item" onclick="openReplay('${r.replay_id}')">
+      <div class="row" style="justify-content:space-between">
+        <b class="mono">${r.replay_id.slice(0,16)}…</b>
+        <span class="chip ${r.verdict === 'exact_reproduction' ? 'ok' : 'warn'}">${r.verdict}</span>
+      </div>
+      <div class="smalltxt">${r.axes_changed.join('+') || 'no-axis-change'} · req ${r.request_id.slice(10,18)}</div>
+    </div>`).join('') || '<div class=muted>暂无重演</div>';
+}
+async function openReplay(id) {
+  const r = await api.get(`/api/replays/${id}`);
+  const rep = {
+    replay_id: r.replay_id, request_id: r.request_id, verdict: r.verdict, note: r.note,
+    axes_changed: r.axes_changed, primary_axis: null,
+    axes: r.axes,
+    original: { output: r.original_output, fingerprints: r.original_fingerprints },
+    replay: { output: r.replay_output, fingerprints: r.replay_fingerprints },
+  };
+  renderReport(rep);
+}
+
+loadReqList(); loadReplays();
+if (q.get('r')) openRequest(q.get('r'));
+</script>
+</body>
+</html>

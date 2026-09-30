@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提示模板治理 · 模板注册表</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>🧩 提示模板版本治理</h1>
+  <nav>
+    <a href="/" class="active">模板 / 发布</a>
+    <a href="evaluate.html">评估页面</a>
+    <a href="replay.html">重演报告</a>
+  </nav>
+  <span style="flex:1"></span>
+  <span id="models" class="smalltxt mono"></span>
+</header>
+
+<div class="layout">
+  <div>
+    <div class="panel">
+      <h2>模板</h2>
+      <div id="templateList"></div>
+      <hr style="border-color:var(--line)">
+      <label>名称</label><input id="tplName" placeholder="customer-support-v1">
+      <label>描述</label><input id="tplDesc" placeholder="用途说明">
+      <div class="row" style="margin-top:8px"><button onclick="createTemplate()">新建模板</button></div>
+    </div>
+    <div class="panel">
+      <h2>操作模型指纹（模拟上游换版）</h2>
+      <p class="smalltxt">相同 model_id 下轮换模型版本，指纹变化会在重演时被归因为 <b>MODEL</b> 轴。</p>
+      <select id="rotModel"></select>
+      <input id="rotRev" placeholder="新 revision，如 r2024-10-02" style="margin-top:6px">
+      <div class="row" style="margin-top:8px"><button class="ghost" onclick="rotateModel()">轮换模型版本</button></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="tplHead" style="display:none">
+      <div class="row" style="justify-content:space-between">
+        <div><span id="tplTitle" style="font-size:16px;font-weight:700"></span>
+          <span id="tplActive" class="chip ok" style="margin-left:8px"></span></div>
+        <span id="tplId" class="mono hash"></span>
+      </div>
+      <p id="tplDescText" class="muted" style="margin:6px 0"></p>
+    </div>
+
+    <div class="panel">
+      <h2>新建版本（系统指令 / 变量契约 / 工具权限 / 模型参数）</h2>
+      <div class="grid2">
+        <div>
+          <label>model_id</label>
+          <select id="vModel"></select>
+          <label>system_instructions（用 {{变量名}} 占位）</label>
+          <textarea id="vInstrs">You are a support agent for {{product}}. Answer briefly. Question: {{question}}</textarea>
+          <label>model_params (JSON)</label>
+          <textarea id="vParams">{"temperature": 0.2, "seed": 7, "max_tokens": 256}</textarea>
+        </div>
+        <div>
+          <label>variables 契约 (JSON)</label>
+          <textarea id="vVars">{
+  "product": {"type": "string", "required": true, "enum": ["billing", "cloud"]},
+  "question": {"type": "string", "required": true}
+}</textarea>
+          <label>tools 权限 (JSON 数组，扩大需重新审批)</label>
+          <textarea id="vTools">["kb.search"]</textarea>
+          <label>semver（留空自动按变更级别推导）</label>
+          <input id="vSemver" placeholder="自动: patch/minor/major">
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px"><button onclick="createVersion()">创建新版本</button></div>
+    </div>
+
+    <div class="panel">
+      <h2>版本时间线</h2>
+      <div id="versionList" class="smalltxt muted">选择左侧模板。</div>
+    </div>
+
+    <div class="panel" id="detailPanel" style="display:none">
+      <h2>版本详情与发布闸门</h2>
+      <div id="versionDetail"></div>
+    </div>
+
+    <div class="panel" id="inferPanel" style="display:none">
+      <h2>线上推理（绑定精确版本/模型/输入摘要）</h2>
+      <label>inputs (JSON)</label>
+      <textarea id="inferInputs">{"product": "billing", "question": "how do I get a refund?"}</textarea>
+      <div class="row" style="margin-top:8px">
+        <button onclick="infer()">调用线上版本</button>
+        <a id="evalLink" class="ghost chip" target="_blank" style="padding:7px 12px">在评估页面打开 →</a>
+      </div>
+      <div id="inferResult"></div>
+      <div id="recentReqs"></div>
+    </div>
+  </div>
+</div>
+<div class="toast"></div>
+<script src="app.js"></script>
+<script>
+let state = { templates: [], selectedTpl: null, detailV: null };
+
+async function loadModels() {
+  const m = await api.get('/api/models');
+  document.getElementById('models').textContent =
+    m.models.map(x => `${x.model_id}@${x.active_revision}`).join('  ·  ');
+  const opts = m.models.map(x => `<option>${x.model_id}</option>`).join('');
+  document.getElementById('vModel').innerHTML = opts;
+  document.getElementById('rotModel').innerHTML = opts;
+}
+
+async function rotateModel() {
+  guard(async () => {
+    const r = await api.post('/api/models/rotate', {
+      model_id: document.getElementById('rotModel').value,
+      revision: document.getElementById('rotRev').value
+    });
+    toast('模型已轮换，新指纹 ' + r.fingerprint);
+    loadModels();
+  });
+}
+
+async function createTemplate() {
+  guard(async () => {
+    const t = await api.post('/api/templates', {
+      name: document.getElementById('tplName').value,
+      description: document.getElementById('tplDesc').value, actor: 'alice'
+    });
+    document.getElementById('tplName').value = '';
+    document.getElementById('tplDesc').value = '';
+    state.selectedTpl = t.template_id;
+    await refresh();
+  });
+}
+
+async function refresh() {
+  await Promise.all([loadTemplates(), loadModels()]);
+  if (state.selectedTpl) await openTemplate(state.selectedTpl, true);
+}
+
+async function loadTemplates() {
+  state.templates = await api.get('/api/templates');
+  document.getElementById('templateList').innerHTML = state.templates.map(t => `
+    <div class="item ${state.selectedTpl === t.template_id ? 'sel' : ''}" onclick="openTemplate('${t.template_id}')">
+      <b>${esc(t.name)}</b>
+      <div class="smalltxt">${esc(t.description || '')}</div>
+      <div class="row" style="margin-top:4px">
+        <span class="chip">v${t.version_count}</span>
+        ${t.active ? `<span class="chip ok">active ${esc(t.active.semver)}</span>` : '<span class="chip warn">未上线</span>'}
+      </div>
+    </div>`).join('') || '<div class="muted smalltxt">还没有模板。</div>';
+}
+
+async function openTemplate(id, keep) {
+  state.selectedTpl = id;
+  const t = await api.get(`/api/templates/${id}`);
+  document.getElementById('tplHead').style.display = '';
+  document.getElementById('inferPanel').style.display = '';
+  document.getElementById('tplTitle').textContent = t.name;
+  document.getElementById('tplDescText').textContent = t.description || '';
+  document.getElementById('tplId').textContent = t.template_id;
+  document.getElementById('tplActive').textContent = t.active ? `线上 ${t.active.semver} · ${t.active.version_hash.slice(0,10)}…` : '无线上版本';
+  document.getElementById('evalLink').href = `evaluate.html?t=${id}`;
+  renderVersions(t.versions);
+  if (state.detailV) showVersion(state.detailV);
+  loadRequests();
+  loadTemplates();
+}
+
+function renderVersions(vs) {
+  state.versions = vs;
+  document.getElementById('versionList').innerHTML = vs.map(v => `
+    <div class="item ${state.detailV === v.version_hash ? 'sel' : ''}" onclick="showVersion('${v.version_hash}')">
+      <div class="row" style="justify-content:space-between">
+        <b>v${esc(v.semver)}</b> ${statusChip(v.status)}
+        <span class="chip">${esc(v.change_class)}</span>
+      </div>
+      <div class="smalltxt mono hash">${v.version_hash.slice(0,16)}…</div>
+      <div class="smalltxt">${(v.bump_basis.reasons || []).map(esc).join('; ')}</div>
+    </div>`).join('') || '<div class="muted">尚无版本。</div>';
+}
+
+async function createVersion() {
+  guard(async () => {
+    const body = {
+      model_id: document.getElementById('vModel').value,
+      system_instructions: document.getElementById('vInstrs').value,
+      model_params: JSON.parse(document.getElementById('vParams').value),
+      variables: JSON.parse(document.getElementById('vVars').value),
+      tools: JSON.parse(document.getElementById('vTools').value),
+      actor: 'alice',
+    };
+    const sv = document.getElementById('vSemver').value.trim();
+    if (sv) body.semver = sv;
+    const v = await api.post(`/api/templates/${state.selectedTpl}/versions`, body);
+    toast(`已创建 ${v.semver}（${v.change_class}）`);
+    state.detailV = v.version_hash;
+    await openTemplate(state.selectedTpl);
+  });
+}
+
+async function showVersion(vh) {
+  state.detailV = vh;
+  const v = await api.get(`/api/versions/${vh}`);
+  document.getElementById('detailPanel').style.display = '';
+  const toolsExp = (v.bump_basis?.diff?.tools?.added || []).length > 0;
+  const apps = v.approvals.map(a => `
+      <span class="chip ${a.status === 'approved' ? 'ok' : a.status === 'rejected' ? 'bad' : 'warn'}">
+        ${a.kind}: ${a.status}${a.kind === 'permission_expansion' ? ' @' + (a.grants_snapshot_hash||'').slice(0,8) : ''}</span>`).join(' ');
+  const evs = v.evaluations.map(e => `
+      <tr><td class="mono">${e.eval_id.slice(0,14)}</td>
+        <td>${esc(e.testset_id.slice(0,12))}…</td>
+        <td>${e.status}</td>
+        <td class="${e.late ? 'warn-text' : ''}">${e.late ? '迟到证据' : '发布证据'}</td>
+        <td>${e.summary ? (e.summary.pass_rate*100).toFixed(0)+'%' : '—'}</td>
+        <td><a href="evaluate.html?e=${e.eval_id}">查看</a></td></tr>`).join('');
+  document.getElementById('versionDetail').innerHTML = `
+    <dl class="kv">
+      <dt>semver</dt><dd><b>${esc(v.semver)}</b> ${statusChip(v.status)}</dd>
+      <dt>version_hash</dt><dd class="mono">${v.version_hash}</dd>
+      <dt>content_hash</dt><dd class="mono">${v.content_hash}</dd>
+      <dt>model</dt><dd>${esc(v.model_id)} <span class="muted mono">fp:${v.model_fingerprint_at_creation}</span></dd>
+      <dt>变更级别</dt><dd>${esc(v.change_class)} — ${(v.bump_basis.reasons||[]).map(esc).join('；')}</dd>
+      <dt>grants 快照</dt><dd class="mono">${v.grants_snapshot_hash.slice(0,16)}…
+        ${toolsExp ? '<span class="chip bad">权限扩大，须 permission_expansion 审批</span>' : ''}</dd>
+      <dt>审批</dt><dd><div class="pillbar">${apps || '<span class="muted">无</span>'}</div></dd>
+      <dt>发布证据</dt><dd class="mono">${v.evidence_hash ? v.evidence_hash.slice(0,20)+'…' : '—'}</dd>
+    </dl>
+    <div class="row" style="margin:10px 0">
+      <button class="small" onclick="reqApproval('${vh}','publish')">申请发布审批</button>
+      <button class="small ghost" onclick="reqApproval('${vh}','permission_expansion')">申请权限扩大审批</button>
+      <button class="small" onclick="approveLatest('${vh}')">批准全部待决审批</button>
+      <button class="small" onclick="doPublish('${vh}')">发布（过闸门）</button>
+      <button class="small ghost" onclick="doActivate('${vh}')">热更新上线</button>
+      <button class="small danger" onclick="doRollback('${vh}')">回滚到本版</button>
+      <a class="smalltxt" href="evaluate.html?v=${vh}">→ 去评估页面生成证据</a>
+    </div>
+    <table><thead><tr><th>评估</th><th>测试集</th><th>状态</th><th>类型</th><th>通过率</th><th></th></tr></thead>
+      <tbody>${evs || '<tr><td colspan=6 class=muted>暂无评估</td></tr>'}</tbody></table>
+    <details style="margin-top:8px"><summary class="muted">版本完整内容</summary><pre>${esc(JSON.stringify(v.body, null, 2))}</pre></details>`;
+  renderVersions(state.versions || []);
+}
+
+async function reqApproval(vh, kind) {
+  guard(async () => { await api.post(`/api/versions/${vh}/approvals`, { kind, actor: 'reviewer', reason: kind });
+    toast('已申请 ' + kind); showVersion(vh); });
+}
+async function approveLatest(vh) {
+  guard(async () => {
+    const v = await api.get(`/api/versions/${vh}`);
+    for (const a of v.approvals.filter(x => x.status === 'requested'))
+      await api.post(`/api/approvals/${a.approval_id}/decision`, { approve: true, actor: 'security-board' });
+    toast('待决审批已批准'); showVersion(vh);
+  });
+}
+async function doPublish(vh) {
+  guard(async () => { const v = await api.post(`/api/versions/${vh}/publish`, { actor: 'release-manager' });
+    toast(`已发布 ${v.semver}，固定证据 ${v.evidence_hash.slice(0,12)}…`);
+    state.detailV = vh; await openTemplate(state.selectedTpl); });
+}
+async function doActivate(vh) {
+  guard(async () => {
+    const cur = state.templates.find(t => t.template_id === state.selectedTpl);
+    const body = { version_hash: vh, actor: 'ops', reason: 'hot update' };
+    await api.post(`/api/templates/${state.selectedTpl}/activate`, body);
+    toast('热更新完成（单行原子指针切换）'); await openTemplate(state.selectedTpl);
+  });
+}
+async function doRollback(vh) {
+  guard(async () => {
+    await api.post(`/api/templates/${state.selectedTpl}/rollback`,
+      { version_hash: vh, actor: 'ops', reason: 'manual rollback' });
+    toast('回滚完成'); await openTemplate(state.selectedTpl);
+  });
+}
+
+async function infer() {
+  guard(async () => {
+    const r = await api.post(`/api/templates/${state.selectedTpl}/infer`,
+      { inputs: JSON.parse(document.getElementById('inferInputs').value), actor: 'web' });
+    const b = r.binding;
+    document.getElementById('inferResult').innerHTML = `
+      <div class="panel" style="margin-top:10px;background:var(--panel2)">
+        <div class="row" style="justify-content:space-between"><b>输出</b>
+          <a class="chip ghost" href="replay.html?r=${r.request_id}" target="_blank">重演此请求 →</a></div>
+        <pre style="max-height:80px">${esc(r.output)}</pre>
+        <dl class="kv">
+          <dt>request_id</dt><dd class="mono">${r.request_id}</dd>
+          <dt>version</dt><dd class="mono">${b.semver} ${b.version_hash.slice(0,12)}…</dd>
+          <dt>model</dt><dd class="mono">${b.model_id}@${b.model_revision} fp:${b.model_fingerprint}</dd>
+          <dt>input_digest</dt><dd class="mono">${b.input_digest.slice(0,24)}…</dd>
+          <dt>prompt_sha</dt><dd class="mono">${b.prompt_sha}</dd>
+        </dl>
+      </div>`;
+    loadRequests();
+  });
+}
+
+async function loadRequests() {
+  if (!state.selectedTpl) return;
+  const rs = (await api.get('/api/requests')).filter(r => r.template_id === state.selectedTpl).slice(0, 8);
+  document.getElementById('recentReqs').innerHTML = rs.length ? `
+    <h2 style="margin-top:14px">最近请求（按原元数据留档）</h2>
+    <table><thead><tr><th>request</th><th>版本</th><th>model@rev</th><th>input_digest</th><th></th></tr></thead>
+    <tbody>${rs.map(r => `<tr>
+      <td class="mono">${r.request_id.slice(10,18)}</td>
+      <td>${esc(r.semver)}</td>
+      <td class="mono smalltxt">${esc(r.model_id)}@${esc(r.model_revision)}</td>
+      <td class="mono smalltxt">${r.input_digest.slice(0,12)}…</td>
+      <td><a href="replay.html?r=${r.request_id}" target="_blank">重演</a></td></tr>`).join('')}
+    </tbody></table>` : '';
+}
+
+refresh();
+</script>
+</body>
+</html>

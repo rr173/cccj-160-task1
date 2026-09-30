@@ -1,0 +1,60 @@
+:root {
+  --bg: #0f1420; --panel: #171e2e; --panel2: #1d2638; --line: #2a3550;
+  --text: #e6ebf5; --muted: #8b97b1; --accent: #5b9dff; --ok: #3ecf8e;
+  --warn: #f5a623; --bad: #ff6b6b; --chip: #24304a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  background: var(--bg); color: var(--text); }
+a { color: var(--accent); text-decoration: none; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+header { display: flex; align-items: center; gap: 18px; padding: 12px 20px;
+  background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header nav a { color: var(--muted); margin-right: 14px; font-weight: 500; }
+header nav a.active, header nav a:hover { color: var(--text); }
+.layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.row + .row { margin-top: 8px; }
+input, textarea, select, button { font: inherit; }
+input, textarea, select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 9px; width: 100%; }
+textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 90px; }
+button { background: var(--accent); color: #0b1020; border: 0; border-radius: 7px; padding: 7px 13px;
+  font-weight: 600; cursor: pointer; white-space: nowrap; }
+button.ghost { background: var(--chip); color: var(--text); }
+button.danger { background: var(--bad); color: #210b0b; }
+button.small { padding: 3px 9px; font-size: 12px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+label { font-size: 12px; color: var(--muted); display: block; margin: 8px 0 3px; }
+.chip { display: inline-block; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 9px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.chip.ok { color: var(--ok); border-color: #235240; }
+.chip.bad { color: var(--bad); border-color: #5b2b2b; }
+.chip.warn { color: var(--warn); border-color: #5c4520; }
+.chip.pub { color: #9ad; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.hash { color: var(--muted); }
+.item { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; margin-bottom: 8px; cursor: pointer; background: var(--panel2); }
+.item:hover { border-color: var(--accent); }
+.item.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+pre { background: #0b0f1a; border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+  overflow: auto; font-size: 12px; max-height: 340px; }
+.muted { color: var(--muted); }
+.ok-text { color: var(--ok); } .bad-text { color: var(--bad); } .warn-text { color: var(--warn); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.axis { border-left: 3px solid var(--line); padding: 6px 10px; margin-bottom: 8px; border-radius: 0 8px 8px 0; background: var(--panel2); }
+.axis.changed { border-left-color: var(--warn); }
+.axis.same { border-left-color: var(--ok); }
+.pillbar { display: flex; gap: 8px; flex-wrap: wrap; }
+.toast { position: fixed; bottom: 18px; right: 18px; background: #223; border: 1px solid var(--line);
+  padding: 10px 14px; border-radius: 8px; max-width: 420px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+.toast.err { border-color: var(--bad); }
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 3px 10px; font-size: 12.5px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-all; }
+.smalltxt { font-size: 12px; color: var(--muted); }

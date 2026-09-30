@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>评估证据 · 固定测试集</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>🧪 评估页面</h1>
+  <nav>
+    <a href="/">模板 / 发布</a>
+    <a href="evaluate.html" class="active">评估页面</a>
+    <a href="replay.html">重演报告</a>
+  </nav>
+</header>
+
+<div class="layout">
+  <div>
+    <div class="panel">
+      <h2>固定测试集</h2>
+      <div id="setList"></div>
+      <label>名称</label><input id="setName" value="support-golden-v1">
+      <label>用例 JSON（inputs + expect）</label>
+      <textarea id="setCases">[
+  {"case_id": "refund", "inputs": {"product": "billing", "question": "how do I get a refund?"}, "expect": {"min_len": 3}},
+  {"case_id": "cloud", "inputs": {"product": "cloud", "question": "which regions exist?"}, "expect": {"min_len": 3}}
+]</textarea>
+      <div class="row" style="margin-top:8px">
+        <button onclick="createSet()">创建测试集</button>
+        <button class="ghost" onclick="freezeSel()">冻结选中集</button>
+      </div>
+      <p class="smalltxt">冻结后内容不可变；评估记录固定 testset_hash。</p>
+    </div>
+    <div class="panel">
+      <h2>运行评估</h2>
+      <label>模板版本</label>
+      <select id="verSel"></select>
+      <label>迟到延迟（秒，0=立即；&gt;0 模拟评估结果迟到）</label>
+      <input id="delay" type="number" step="0.1" value="0">
+      <div class="row" style="margin-top:8px">
+        <button onclick="startEval()">对该版本运行固定测试集</button>
+        <button class="ghost" onclick="waitFinish()">等待后台完成</button>
+      </div>
+      <p class="smalltxt">发布钉住当时通过的证据快照；之后完成的运行标记为<b>迟到证据</b>，不覆盖发布快照。</p>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel" id="setDetailPanel" style="display:none">
+      <h2>测试集详情</h2>
+      <div id="setDetail"></div>
+    </div>
+    <div class="panel" id="evalPanel" style="display:none">
+      <h2>评估证据 <span id="evalBadge"></span></h2>
+      <div id="evalSummary"></div>
+      <div id="evalRows"></div>
+    </div>
+    <div class="panel">
+      <h2>评估运行列表</h2>
+      <div id="evalList" class="smalltxt muted">加载中…</div>
+    </div>
+  </div>
+</div>
+<div class="toast"></div>
+<script src="app.js"></script>
+<script>
+let S = { set: null, eval: null, versions: [], pollTimer: null };
+const q = new URLSearchParams(location.search);
+
+async function loadSets() {
+  const sets = await api.get('/api/testsets');
+  document.getElementById('setList').innerHTML = sets.map(s => `
+    <div class="item ${S.set === s.testset_id ? 'sel' : ''}" onclick="openSet('${s.testset_id}')">
+      <b>${esc(s.name)}</b>
+      <div class="row" style="margin-top:3px">
+        ${s.frozen ? '<span class="chip ok">已冻结</span>' : '<span class="chip warn">可变</span>'}
+        <span class="mono smalltxt hash">${s.content_hash.slice(0,12)}…</span>
+      </div>
+    </div>`).join('') || '<div class=muted>无测试集</div>';
+  return sets;
+}
+
+async function loadVersions() {
+  const tpls = await api.get('/api/templates');
+  S.versions = [];
+  for (const t of tpls) {
+    const vs = await api.get(`/api/templates/${t.template_id}/versions`);
+    vs.forEach(v => S.versions.push({ ...v, tplName: t.name }));
+  }
+  document.getElementById('verSel').innerHTML = S.versions.map(v =>
+    `<option value="${v.version_hash}">${esc(v.tplName)} · ${v.semver} [${v.status}]</option>`).join('')
+    || '<option>先创建模板版本</option>';
+  if (q.get('v')) document.getElementById('verSel').value = q.get('v');
+}
+
+async function createSet() {
+  guard(async () => {
+    const s = await api.post('/api/testsets', {
+      name: document.getElementById('setName').value,
+      cases: JSON.parse(document.getElementById('setCases').value), actor: 'qa'
+    });
+    S.set = s.testset_id; await refreshAll();
+    toast('测试集已创建（首次评估自动冻结，或手动冻结）');
+  });
+}
+async function freezeSel() {
+  guard(async () => {
+    if (!S.set) return toast('先选择测试集', true);
+    await api.post(`/api/testsets/${S.set}/freeze`, {});
+    toast('测试集已冻结'); refreshAll();
+  });
+}
+
+async function openSet(id) {
+  S.set = id;
+  const s = await api.get(`/api/testsets/${id}`);
+  document.getElementById('setDetailPanel').style.display = '';
+  document.getElementById('setDetail').innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <b>${esc(s.name)}</b>
+      ${s.frozen ? '<span class="chip ok">FROZEN</span>' : '<span class="chip warn">mutable</span>'}
+    </div>
+    <dl class="kv"><dt>testset_id</dt><dd class="mono">${s.testset_id}</dd>
+      <dt>content_hash</dt><dd class="mono">${s.content_hash}</dd>
+      <dt>用例数</dt><dd>${s.cases.length}</dd></dl>
+    <table><thead><tr><th>case</th><th>inputs</th><th>expect</th></tr></thead><tbody>
+    ${s.cases.map(c => `<tr><td>${esc(c.case_id)}</td>
+      <td class="mono smalltxt">${esc(JSON.stringify(c.inputs))}</td>
+      <td class="mono smalltxt">${esc(JSON.stringify(c.expect))}</td></tr>`).join('')}
+    </tbody></table>`;
+  loadSets();
+}
+
+async function startEval() {
+  guard(async () => {
+    const vh = document.getElementById('verSel').value;
+    if (!S.set) return toast('先选择/创建测试集', true);
+    const e = await api.post(`/api/versions/${vh}/evaluate`, {
+      testset_id: S.set, delay: parseFloat(document.getElementById('delay').value || 0), actor: 'ci'
+    });
+    S.eval = e.eval_id;
+    toast('评估已启动');
+    renderEval(e);
+    pollEval();
+  });
+}
+async function waitFinish() {
+  await api.post('/api/evaluations/finish', { timeout: 10 });
+  refreshAll();
+}
+
+function pollEval() {
+  clearInterval(S.pollTimer);
+  let n = 0;
+  S.pollTimer = setInterval(async () => {
+    try {
+      const e = await api.get(`/api/evaluations/${S.eval}`);
+      renderEval(e);
+      if (e.status !== 'running' || ++n > 60) { clearInterval(S.pollTimer); loadEvalList(); }
+    } catch { clearInterval(S.pollTimer); }
+  }, 500);
+}
+
+function renderEval(e) {
+  document.getElementById('evalPanel').style.display = '';
+  document.getElementById('evalBadge').innerHTML = e.late
+    ? '<span class="chip warn">迟到证据（不覆盖发布快照）</span>'
+    : '<span class="chip ok">可作为发布证据</span>';
+  const s = e.summary || {};
+  document.getElementById('evalSummary').innerHTML = `
+    <dl class="kv">
+      <dt>eval_id</dt><dd class="mono">${e.eval_id}</dd>
+      <dt>状态</dt><dd>${esc(e.status)}${e.error ? ' <span class="bad-text">' + esc(e.error) + '</span>' : ''}</dd>
+      <dt>固定测试集</dt><dd class="mono">${e.testset_id} @ ${e.testset_hash.slice(0,16)}…</dd>
+      <dt>evidence_hash</dt><dd class="mono">${e.evidence_hash || '（运行中）'}</dd>
+      <dt>publish_ref</dt><dd class="mono">${e.publish_ref ? e.publish_ref.slice(0,16)+'…' : '—'}</dd>
+      <dt>通过率</dt><dd><b>${s.pass_rate !== undefined ? (s.pass_rate*100).toFixed(0)+'%' : '…'}</b>
+        (${s.passed ?? '–'}/${s.total ?? '–'})</dd>
+      <dt>模型指纹</dt><dd class="mono">${esc(s.model_id || '')} fp:${s.model_fingerprint || '…'}</dd>
+    </dl>`;
+  document.getElementById('evalRows').innerHTML = (e.results || []).length ? `
+    <table><thead><tr><th>case</th><th>结果</th><th>output</th><th>model fp / rev / prompt</th><th>失败点</th></tr></thead>
+    <tbody>${e.results.map(r => `<tr>
+      <td>${esc(r.case_id)}</td>
+      <td>${r.passed ? '<span class="ok-text">PASS</span>' : '<span class="bad-text">FAIL</span>'}</td>
+      <td class="mono smalltxt">${esc(r.output_text)}</td>
+      <td class="mono smalltxt">${r.model_fingerprint}<br>${esc(r.model_revision)}<br>${r.prompt_sha}</td>
+      <td class="smalltxt bad-text">${r.failure ? esc(JSON.stringify(r.failure)) : ''}</td>
+    </tr>`).join('')}</tbody></table>`
+    : '<p class="muted">运行中，逐用例落库…</p>';
+}
+
+async function loadEvalList() {
+  const evs = await api.get('/api/evaluations');
+  document.getElementById('evalList').innerHTML = evs.slice().reverse().map(e => `
+    <div class="item ${S.eval === e.eval_id ? 'sel' : ''}" onclick="selectEval('${e.eval_id}')">
+      <div class="row" style="justify-content:space-between">
+        <b class="mono">${e.eval_id.slice(0,16)}…</b>
+        <span class="chip ${e.status === 'complete' ? 'ok' : e.status === 'failed' ? 'bad' : 'warn'}">${e.status}</span>
+        ${e.late ? '<span class="chip warn">late</span>' : ''}
+      </div>
+      <div class="smalltxt">${esc(e.version_hash.slice(0,10))}… · ${esc(e.testset_hash.slice(0,10))}…
+        ${e.summary ? '· ' + (e.summary.pass_rate*100).toFixed(0) + '%' : ''}</div>
+    </div>`).join('') || '<div class=muted>无评估运行</div>';
+}
+async function selectEval(id) {
+  S.eval = id;
+  const e = await api.get(`/api/evaluations/${id}`);
+  renderEval(e);
+  if (e.status === 'running') pollEval();
+}
+
+async function refreshAll() {
+  await loadSets();
+  await loadVersions();
+  await loadEvalList();
+  if (S.set) openSet(S.set);
+  if (q.get('e')) { await selectEval(q.get('e')); }
+}
+refreshAll();
+</script>
+</body>
+</html>
